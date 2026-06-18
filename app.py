@@ -41,17 +41,20 @@ if uploaded_file is not None:
     
     # --- EXECUTION BUTTON ---
     if st.button("Run Inspection", type="primary"):
-        with st.spinner('Routing image through backend pipeline...'):
+        with st.spinner('Running AI Inference Pipeline...'):
             
-            # Send the image and selection to our backend router
             result = mock_predict_stage(image, selected_stage)
             
-            # Display the backend response on the frontend
             if result["status"] == "success":
                 st.success(f"Successfully routed to: **{result['routed_to']}**")
                 st.write(f"**Backend Message:** {result['message']}")
+                
+                # NEW: If the backend returned a processed image, display it!
+                if result.get("processed_image") is not None:
+                    st.subheader("Defect Analysis Result")
+                    st.image(result["processed_image"], caption=f"Output from {result['routed_to']} Model", use_container_width=True)
             else:
-                st.error("There was an error routing the image.")
+                st.error(f"Error: {result['message']}")
 
 else:
     st.info("Please upload an image to begin.")
