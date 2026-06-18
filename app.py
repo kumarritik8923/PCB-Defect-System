@@ -1,40 +1,57 @@
+# app.py
+
 import streamlit as st
 from PIL import Image
 
-# --- PAGE CONFIGURATION ---
-# This sets the browser tab title and layout
+# Import our backend logic
+from backend.router import mock_predict_stage
+
 st.set_page_config(
     page_title="PCB Defect Detection",
     page_icon="🔍",
     layout="centered"
 )
 
-# --- HEADER SECTION ---
 st.title("PCB Defect Detection System")
 st.markdown("Upload a PCB image to detect manufacturing defects across different assembly stages.")
 st.divider()
 
-# --- UPLOAD SECTION ---
-# Create a drag-and-drop file uploader restricted to standard image formats
 uploaded_file = st.file_uploader("Choose a PCB image...", type=["jpg", "jpeg", "png"])
 
-# --- DISPLAY SECTION ---
-# Check if the user has actually uploaded a file before trying to process it
 if uploaded_file is not None:
-    
-    # Read the image file into memory
     image = Image.open(uploaded_file)
     
-    # Display the raw uploaded image to the user
     st.subheader("Uploaded Image")
     st.image(image, caption="Ready for inspection", use_container_width=True)
-    
-    # Placeholder button for the future ML pipeline
     st.divider()
+    
+    # --- PHASE 2: MOCK ROUTER UI ---
+    st.subheader("System Configuration")
+    st.info("The 5-class Router CNN is currently bypassed. Please manually select the stage to test the backend routing.")
+    
+    # Dropdown menu to simulate the AI prediction
+    stage_options = [
+        "Stage 1: Bare Board",
+        "Stage 2: Solder Paste (SAHI)",
+        "Stage 3: Component Placement",
+        "Stage 4: Final Assembly (Top View)",
+        "Stage 4: Final Assembly (Side View)"
+    ]
+    selected_stage = st.selectbox("Mock AI Prediction (Select Stage):", stage_options)
+    
+    # --- EXECUTION BUTTON ---
     if st.button("Run Inspection", type="primary"):
-        # We use st.info to show a temporary UI message
-        st.info("Machine Learning backend is not yet connected. This will trigger the routing pipeline in Phase 2.")
+        with st.spinner('Routing image through backend pipeline...'):
+            
+            # Send the image and selection to our backend router
+            result = mock_predict_stage(image, selected_stage)
+            
+            # Display the backend response on the frontend
+            if result["status"] == "success":
+                st.success(f"Successfully routed to: **{result['routed_to']}**")
+                st.write(f"**Backend Message:** {result['message']}")
+            else:
+                st.error("There was an error routing the image.")
 
 else:
-    # Prompt the user to take action if the upload box is empty
     st.info("Please upload an image to begin.")
