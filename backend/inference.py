@@ -1,5 +1,3 @@
-# backend/inference.py
-
 from ultralytics import YOLO
 import cv2
 import numpy as np
@@ -14,33 +12,29 @@ try:
     stage4_top = YOLO("models/stage4_top_best.pt")
     stage4_side = YOLO("models/stage4_side_best.pt")
     
-    # SAHI requires a special wrapper around the YOLO model
+    # NEW: Load the real Image Classification model
+    router_model = YOLO("models/router_classifier_best.pt")
+    
     stage2_sahi_model = AutoDetectionModel.from_pretrained(
         model_type='yolov8',
         model_path="models/stage2_sahi_best.pt",
         confidence_threshold=0.25,
-        device="cpu" # Change to "cuda:0" if you have a GPU
+        device="cpu" 
     )
-    print("[SYSTEM] All standard and SAHI models loaded successfully.")
+    print("[SYSTEM] All Object Detection & Router models loaded successfully.")
 except Exception as e:
     print(f"[SYSTEM ERROR] Could not load all models. Check your models/ folder. Error: {e}")
 
 # --- 2. STANDARD INFERENCE FUNCTION (Used for Stage 1, 3, and 4) ---
 def run_standard_yolo(image_pil, model, target_size):
-    """A reusable function for standard YOLO inference."""
     if model is None:
         return {"status": "error", "message": "Model weights missing."}
 
-    # Resize
     image_resized = image_pil.resize((target_size, target_size))
-    
-    # Predict
     results = model.predict(source=image_resized, imgsz=target_size, conf=0.25)
     
-    # Format Image
     result_bgr = results[0].plot()
     result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
-    
     defect_count = len(results[0].boxes)
 
     return {
@@ -64,14 +58,11 @@ def run_stage4_side_inference(image_pil):
 
 # --- 4. SAHI INFERENCE FUNCTION (Stage 2) ---
 def run_stage2_sahi_inference(image_pil):
-    """Specialized function executing the Slicing Aided Hyper Inference."""
     if 'stage2_sahi_model' not in globals():
          return {"status": "error", "message": "SAHI Model weights missing."}
     
-    # Convert PIL to Numpy array (RGB) for SAHI and drawing
     image_array = np.array(image_pil)
 
-    # Execute SAHI Slicing (Chops into 640x640 tiles with 20% overlap)
     result = get_sliced_prediction(
         image_array,
         stage2_sahi_model,
@@ -81,10 +72,8 @@ def run_stage2_sahi_inference(image_pil):
         overlap_width_ratio=0.2
     )
 
-    # THE FIX: Create a fresh copy of our original NumPy array to draw on
     result_image_array = image_array.copy()
     
-    # Draw SAHI bounding boxes manually using OpenCV
     for object_prediction in result.object_prediction_list:
         bbox = object_prediction.bbox.to_xyxy()
         cv2.rectangle(result_image_array, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
@@ -98,24 +87,34 @@ def run_stage2_sahi_inference(image_pil):
         "message": f"SAHI Inference complete. Detected {defect_count} microscopic defects.",
     }
 
-
-# --- 5. PHASE 5 ROUTER CLASSIFIER (Placeholder) ---
-
-# When you train your classifier, you will uncomment this:
-# router_model = YOLO("models/router_classifier_best.pt")
-
+# --- 5. PHASE 5 REAL ROUTER CLASSIFIER ---
 def run_ai_classifier(image_pil):
     """
-    Predicts which of the 5 stages the image belongs to.
-    Currently acts as a placeholder until the model is trained.
+    Predicts which of the 5 stages the image belongs to using YOLO11-cls.
     """
-    # TODO: Replace this block with real YOLO classification logic later
-    # results = router_model.predict(image_pil)
-    # predicted_class_name = results[0].names[results[0].probs.top1]
-    # return predicted_class_name
+    if 'router_model' not in globals():
+        print("[WARNING] Router model missing. Defaulting to Stage 1.")
+        return "Stage 1: Inked Board"
+        
+    # Run the image through the classification model at 224x224 resolution
+    results = router_model.predict(source=image_pil, imgsz=224)
     
-    # For testing right now, we will just force it to predict Stage 1
-    # so we can verify the Auto-Detect logic works.
-    print("[SYSTEM] Running AI Classifier Placeholder...")
-    dummy_prediction = "Stage 1: Bare Board"
-    return dummy_prediction
+    # Extract the index of the highest probability guess (top1)
+    predicted_idx = results[0].probs.top1
+    
+    # Get the raw folder name the model associated with that index
+    raw_class_name = results[0].names[predicted_idx]
+    
+    print(f"[SYSTEM] AI Raw Prediction: {raw_class_name}")
+    
+    # Map the raw folder names to the clean strings expected by router.py
+    mapping = {
+        "Stage_1_InkedBoard": "Stage 1: Inked Board",
+        "Stage_2_AcidEtch": "Stage 2: Acid Batch (Etched)",
+        "Stage_3_GreenCoating": "Stage 3: Green Coating",
+        "Stage_4_WeldingTop": "Stage 4: Component Welding (Top View)",
+        "Stage_4_WeldingSide": "Stage 4: Component Welding (Side View)"
+    }
+    
+    # Return the mapped string. If there's a weird error, safely default to Stage 1.
+    return mapping.get(raw_class_name, "Stage 1: Inked Board")

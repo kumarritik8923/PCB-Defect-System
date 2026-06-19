@@ -1,12 +1,10 @@
-# backend/router.py
-
 from .inference import (
     run_stage1_inference, 
     run_stage2_sahi_inference, 
     run_stage3_inference, 
     run_stage4_top_inference, 
     run_stage4_side_inference,
-    run_ai_classifier # Import the new classifier function
+    run_ai_classifier 
 )
 
 def mock_predict_stage(image, selection):
@@ -15,7 +13,7 @@ def mock_predict_stage(image, selection):
     
     # --- HYBRID ROUTING LOGIC ---
     if selection == "Auto-Detect Stage (AI)":
-        print("[BACKEND] Auto-Detect selected. Passing to AI Classifier...")
+        print("[BACKEND] Auto-Detect selected. Passing to real AI Classifier...")
         active_stage = run_ai_classifier(image)
         print(f"[BACKEND] AI Predicted: {active_stage}")
         response["message"] += f"**AI Auto-Detected:** {active_stage}. "
@@ -25,25 +23,31 @@ def mock_predict_stage(image, selection):
         response["message"] += f"**Manual Override:** {active_stage}. "
 
     # --- EXECUTE THE ACTIVE STAGE ---
-    if active_stage == "Stage 1: Bare Board":
+    # UPDATED: Matching the new industrial text strings
+    if active_stage == "Stage 1: Inked Board":
+        print("[BACKEND] Executing Stage 1 (640x640)")
         res = run_stage1_inference(image)
         
-    elif active_stage == "Stage 2: Solder Paste (SAHI)":
+    elif active_stage == "Stage 2: Acid Batch (Etched)":
+        print("[BACKEND] Executing Stage 2 SAHI Pipeline")
         res = run_stage2_sahi_inference(image)
         
-    elif active_stage == "Stage 3: Component Placement":
+    elif active_stage == "Stage 3: Green Coating":
+        print("[BACKEND] Executing Stage 3 (600x600)")
         res = run_stage3_inference(image)
         
-    elif active_stage == "Stage 4: Final Assembly (Top View)":
+    elif active_stage == "Stage 4: Component Welding (Top View)":
+        print("[BACKEND] Executing Stage 4 Top-View (1024x1024)")
         res = run_stage4_top_inference(image)
         
-    elif active_stage == "Stage 4: Final Assembly (Side View)":
+    elif active_stage == "Stage 4: Component Welding (Side View)":
+        print("[BACKEND] Executing Stage 4 Side-View (1024x1024)")
         res = run_stage4_side_inference(image)
         
     else:
-        return {"status": "error", "message": "Unknown stage routing failure."}
+        return {"status": "error", "message": f"Unknown stage routing failure: {active_stage}"}
 
-    # Map results
+    # Map the inference results back to the frontend response
     if res["status"] == "success":
         response["routed_to"] = active_stage.split(':')[0] # Clean up the name for UI
         response["message"] += res["message"]
