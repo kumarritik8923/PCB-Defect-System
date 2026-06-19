@@ -1,6 +1,6 @@
-streamlit 
-pillow
-
+streamlit
 ultralytics
-
 sahi
+Pillow
+numpy
+opencv-python-headless
