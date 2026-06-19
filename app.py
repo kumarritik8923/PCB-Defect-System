@@ -31,6 +31,7 @@ if uploaded_file is not None:
     
     # Dropdown menu to simulate the AI prediction
     stage_options = [
+        "Auto-Detect Stage (AI)", # Added default option
         "Stage 1: Bare Board",
         "Stage 2: Solder Paste (SAHI)",
         "Stage 3: Component Placement",

@@ -97,3 +97,25 @@ def run_stage2_sahi_inference(image_pil):
         "processed_image": Image.fromarray(result_image_array),
         "message": f"SAHI Inference complete. Detected {defect_count} microscopic defects.",
     }
+
+
+# --- 5. PHASE 5 ROUTER CLASSIFIER (Placeholder) ---
+
+# When you train your classifier, you will uncomment this:
+# router_model = YOLO("models/router_classifier_best.pt")
+
+def run_ai_classifier(image_pil):
+    """
+    Predicts which of the 5 stages the image belongs to.
+    Currently acts as a placeholder until the model is trained.
+    """
+    # TODO: Replace this block with real YOLO classification logic later
+    # results = router_model.predict(image_pil)
+    # predicted_class_name = results[0].names[results[0].probs.top1]
+    # return predicted_class_name
+    
+    # For testing right now, we will just force it to predict Stage 1
+    # so we can verify the Auto-Detect logic works.
+    print("[SYSTEM] Running AI Classifier Placeholder...")
+    dummy_prediction = "Stage 1: Bare Board"
+    return dummy_prediction

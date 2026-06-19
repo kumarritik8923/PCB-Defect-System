@@ -5,41 +5,48 @@ from .inference import (
     run_stage2_sahi_inference, 
     run_stage3_inference, 
     run_stage4_top_inference, 
-    run_stage4_side_inference
+    run_stage4_side_inference,
+    run_ai_classifier # Import the new classifier function
 )
 
-def mock_predict_stage(image, manual_selection):
-    print(f"[BACKEND] Routing override: {manual_selection}")
+def mock_predict_stage(image, selection):
     
     response = {"status": "success", "routed_to": None, "message": "", "processed_image": None}
+    
+    # --- HYBRID ROUTING LOGIC ---
+    if selection == "Auto-Detect Stage (AI)":
+        print("[BACKEND] Auto-Detect selected. Passing to AI Classifier...")
+        active_stage = run_ai_classifier(image)
+        print(f"[BACKEND] AI Predicted: {active_stage}")
+        response["message"] += f"**AI Auto-Detected:** {active_stage}. "
+    else:
+        active_stage = selection
+        print(f"[BACKEND] Manual Override active: {active_stage}")
+        response["message"] += f"**Manual Override:** {active_stage}. "
 
-    if manual_selection == "Stage 1: Bare Board":
-        print("[BACKEND] Executing Stage 1 (640x640)")
+    # --- EXECUTE THE ACTIVE STAGE ---
+    if active_stage == "Stage 1: Bare Board":
         res = run_stage1_inference(image)
         
-    elif manual_selection == "Stage 2: Solder Paste (SAHI)":
-        print("[BACKEND] Executing Stage 2 SAHI Pipeline")
+    elif active_stage == "Stage 2: Solder Paste (SAHI)":
         res = run_stage2_sahi_inference(image)
         
-    elif manual_selection == "Stage 3: Component Placement":
-        print("[BACKEND] Executing Stage 3 (600x600)")
+    elif active_stage == "Stage 3: Component Placement":
         res = run_stage3_inference(image)
         
-    elif manual_selection == "Stage 4: Final Assembly (Top View)":
-        print("[BACKEND] Executing Stage 4 Top-View (1024x1024)")
+    elif active_stage == "Stage 4: Final Assembly (Top View)":
         res = run_stage4_top_inference(image)
         
-    elif manual_selection == "Stage 4: Final Assembly (Side View)":
-        print("[BACKEND] Executing Stage 4 Side-View (1024x1024)")
+    elif active_stage == "Stage 4: Final Assembly (Side View)":
         res = run_stage4_side_inference(image)
         
     else:
-        return {"status": "error", "message": "Unknown stage."}
+        return {"status": "error", "message": "Unknown stage routing failure."}
 
-    # Map the inference results back to the frontend response
+    # Map results
     if res["status"] == "success":
-        response["routed_to"] = manual_selection.split(':')[0]
-        response["message"] = res["message"]
+        response["routed_to"] = active_stage.split(':')[0] # Clean up the name for UI
+        response["message"] += res["message"]
         response["processed_image"] = res.get("processed_image")
     else:
         response["status"] = "error"
