@@ -2,3 +2,5 @@ streamlit
 pillow
 
 ultralytics
+
+sahi

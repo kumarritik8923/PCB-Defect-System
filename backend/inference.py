@@ -4,48 +4,96 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 from PIL import Image
-import os
+from sahi import AutoDetectionModel
+from sahi.predict import get_sliced_prediction
 
-# Load the model globally so it doesn't reload from the hard drive on every single click
-MODEL_PATH = "models/stage1_best.pt"
-
+# --- 1. GLOBAL MODEL LOADING ---
 try:
-    # Initialize the YOLO model
-    stage1_model = YOLO(MODEL_PATH)
-    print("[SYSTEM] Stage 1 Model loaded successfully.")
+    stage1_model = YOLO("models/stage1_best.pt")
+    stage3_model = YOLO("models/stage3_best.pt")
+    stage4_top = YOLO("models/stage4_top_best.pt")
+    stage4_side = YOLO("models/stage4_side_best.pt")
+    
+    # SAHI requires a special wrapper around the YOLO model
+    stage2_sahi_model = AutoDetectionModel.from_pretrained(
+        model_type='yolov8',
+        model_path="models/stage2_sahi_best.pt",
+        confidence_threshold=0.25,
+        device="cpu" # Change to "cuda:0" if you have a GPU
+    )
+    print("[SYSTEM] All standard and SAHI models loaded successfully.")
 except Exception as e:
-    stage1_model = None
-    print(f"[SYSTEM ERROR] Could not load Stage 1 Model. Error: {e}")
+    print(f"[SYSTEM ERROR] Could not load all models. Check your models/ folder. Error: {e}")
 
-def run_stage1_inference(image_pil):
-    """
-    Takes a PIL Image, runs Stage 1 YOLO inference, and returns the processed image.
-    """
-    if stage1_model is None:
-        return {"status": "error", "message": "Model weights not found. Please place 'stage1_best.pt' in the models/ folder."}
+# --- 2. STANDARD INFERENCE FUNCTION (Used for Stage 1, 3, and 4) ---
+def run_standard_yolo(image_pil, model, target_size):
+    """A reusable function for standard YOLO inference."""
+    if model is None:
+        return {"status": "error", "message": "Model weights missing."}
 
-    # 1. Resize the image to 640x640 as required by Stage 1 architecture
-    image_resized = image_pil.resize((640, 640))
+    # Resize
+    image_resized = image_pil.resize((target_size, target_size))
     
-    # 2. Run the YOLO inference. conf=0.25 ignores very low-confidence predictions
-    results = stage1_model.predict(source=image_resized, imgsz=640, conf=0.25)
+    # Predict
+    results = model.predict(source=image_resized, imgsz=target_size, conf=0.25)
     
-    # 3. Extract the image array with the bounding boxes already drawn on it
-    # YOLO returns images in BGR format (OpenCV standard)
-    result_bgr_array = results[0].plot()
+    # Format Image
+    result_bgr = results[0].plot()
+    result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
     
-    # 4. Convert BGR back to RGB so Streamlit (which uses PIL) displays colors correctly
-    result_rgb_array = cv2.cvtColor(result_bgr_array, cv2.COLOR_BGR2RGB)
-    
-    # 5. Convert the numpy array back to a PIL Image object
-    final_processed_image = Image.fromarray(result_rgb_array)
-    
-    # Count how many defects were found (number of bounding boxes)
     defect_count = len(results[0].boxes)
 
     return {
         "status": "success",
-        "processed_image": final_processed_image,
+        "processed_image": Image.fromarray(result_rgb),
         "message": f"Inference complete. Detected {defect_count} potential defects.",
-        "defect_count": defect_count
+    }
+
+# --- 3. STAGE-SPECIFIC WRAPPERS ---
+def run_stage1_inference(image_pil):
+    return run_standard_yolo(image_pil, stage1_model, target_size=640)
+
+def run_stage3_inference(image_pil):
+    return run_standard_yolo(image_pil, stage3_model, target_size=600)
+
+def run_stage4_top_inference(image_pil):
+    return run_standard_yolo(image_pil, stage4_top, target_size=1024)
+
+def run_stage4_side_inference(image_pil):
+    return run_standard_yolo(image_pil, stage4_side, target_size=1024)
+
+# --- 4. SAHI INFERENCE FUNCTION (Stage 2) ---
+def run_stage2_sahi_inference(image_pil):
+    """Specialized function executing the Slicing Aided Hyper Inference."""
+    if 'stage2_sahi_model' not in globals():
+         return {"status": "error", "message": "SAHI Model weights missing."}
+    
+    # Convert PIL to Numpy array (RGB) for SAHI and drawing
+    image_array = np.array(image_pil)
+
+    # Execute SAHI Slicing (Chops into 640x640 tiles with 20% overlap)
+    result = get_sliced_prediction(
+        image_array,
+        stage2_sahi_model,
+        slice_height=640,
+        slice_width=640,
+        overlap_height_ratio=0.2,
+        overlap_width_ratio=0.2
+    )
+
+    # THE FIX: Create a fresh copy of our original NumPy array to draw on
+    result_image_array = image_array.copy()
+    
+    # Draw SAHI bounding boxes manually using OpenCV
+    for object_prediction in result.object_prediction_list:
+        bbox = object_prediction.bbox.to_xyxy()
+        cv2.rectangle(result_image_array, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
+        cv2.putText(result_image_array, object_prediction.category.name, (int(bbox[0]), int(bbox[1])-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,0,0), 2)
+
+    defect_count = len(result.object_prediction_list)
+
+    return {
+        "status": "success",
+        "processed_image": Image.fromarray(result_image_array),
+        "message": f"SAHI Inference complete. Detected {defect_count} microscopic defects.",
     }
