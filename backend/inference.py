@@ -12,7 +12,7 @@ try:
     stage4_top = YOLO("models/stage4_top_best.pt")
     stage4_side = YOLO("models/stage4_side_best.pt")
     
-    # NEW: Load the real Image Classification model
+    # Load the real Image Classification model
     router_model = YOLO("models/router_classifier_best.pt")
     
     stage2_sahi_model = AutoDetectionModel.from_pretrained(
@@ -96,18 +96,12 @@ def run_ai_classifier(image_pil):
         print("[WARNING] Router model missing. Defaulting to Stage 1.")
         return "Stage 1: Inked Board"
         
-    # Run the image through the classification model at 224x224 resolution
     results = router_model.predict(source=image_pil, imgsz=224)
-    
-    # Extract the index of the highest probability guess (top1)
     predicted_idx = results[0].probs.top1
-    
-    # Get the raw folder name the model associated with that index
     raw_class_name = results[0].names[predicted_idx]
     
     print(f"[SYSTEM] AI Raw Prediction: {raw_class_name}")
     
-    # Map the raw folder names to the clean strings expected by router.py
     mapping = {
         "Stage_1_InkedBoard": "Stage 1: Inked Board",
         "Stage_2_AcidEtch": "Stage 2: Acid Batch (Etched)",
@@ -116,5 +110,4 @@ def run_ai_classifier(image_pil):
         "Stage_4_WeldingSide": "Stage 4: Component Welding (Side View)"
     }
     
-    # Return the mapped string. If there's a weird error, safely default to Stage 1.
     return mapping.get(raw_class_name, "Stage 1: Inked Board")

@@ -1,0 +1,13 @@
+# .streamlit/config.toml
+
+[theme]
+# A sleek, dark industrial theme
+base="dark"
+primaryColor="#00E5FF" # Electric Cyan for the primary buttons and accents
+backgroundColor="#0E1117" # Deep dark background
+secondaryBackgroundColor="#262730" # Slightly lighter dark for sidebars and panels
+textColor="#FAFAFA" # Crisp white text
+font="sans serif"
+
+[client]
+showErrorDetails = false # Hides the messy python tracebacks from the user

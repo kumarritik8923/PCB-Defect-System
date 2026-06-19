@@ -16,14 +16,12 @@ def mock_predict_stage(image, selection):
         print("[BACKEND] Auto-Detect selected. Passing to real AI Classifier...")
         active_stage = run_ai_classifier(image)
         print(f"[BACKEND] AI Predicted: {active_stage}")
-        response["message"] += f"**AI Auto-Detected:** {active_stage}. "
+        # UI FIX: Removed the clunky "AI Auto-Detected: " text injection here!
     else:
         active_stage = selection
         print(f"[BACKEND] Manual Override active: {active_stage}")
-        response["message"] += f"**Manual Override:** {active_stage}. "
 
     # --- EXECUTE THE ACTIVE STAGE ---
-    # UPDATED: Matching the new industrial text strings
     if active_stage == "Stage 1: Inked Board":
         print("[BACKEND] Executing Stage 1 (640x640)")
         res = run_stage1_inference(image)
@@ -47,10 +45,10 @@ def mock_predict_stage(image, selection):
     else:
         return {"status": "error", "message": f"Unknown stage routing failure: {active_stage}"}
 
-    # Map the inference results back to the frontend response
+    # Map the clean inference results back to the frontend response
     if res["status"] == "success":
-        response["routed_to"] = active_stage.split(':')[0] # Clean up the name for UI
-        response["message"] += res["message"]
+        response["routed_to"] = active_stage.split(':')[0] # Clean up the name (e.g., "Stage 3")
+        response["message"] = res["message"] # Kept entirely clean!
         response["processed_image"] = res.get("processed_image")
     else:
         response["status"] = "error"
