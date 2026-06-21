@@ -30,22 +30,29 @@ def execute_read_query(query):
         return f"SQL Execution Error: {e}"
 
 def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
-    # --- STEP 1: Text to SQL ---
+    # --- STEP 1: SIMPLIFIED PROMPT FOR SMALL MODELS ---
     sql_prompt = f"""
-    You are a SQLite expert. Given this schema: {DATABASE_SCHEMA}
-    Write a valid SQLite query to answer: "{user_question}"
-    RULES: Return ONLY the raw SQL query. No markdown. No explanations. Only SELECT.
+    You are an AI Factory Data Analyst for a PCB Defect Detection System.
+    Database Schema: {DATABASE_SCHEMA}
+    User Input: "{user_question}"
+    
+    INSTRUCTIONS:
+    If the user asks about the factory database, return ONLY a valid SQLite query starting with "SQL:"
+    Example: SQL: SELECT COUNT(*) FROM inference_logs
+    
+    If the user greets you, talks about other topics, or asks out-of-domain questions, politely reply starting with "CHAT:"
+    Example: CHAT: I am a PCB Data Analyst. I don't know about Doraemon, but I can check our factory logs!
     """
     
-    sql_query = ""
+    raw_response = ""
     client = None
     
     if engine == "Cloud Engine (Gemini)":
-        if not api_key: return "Error: Provide Gemini API Key."
+        if not api_key: return "Error: Provide Gemini API Key in secrets."
         try:
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(model='gemini-2.5-flash', contents=sql_prompt)
-            sql_query = response.text.strip().replace("```sql", "").replace("```", "").replace(";", "")
+            raw_response = response.text.strip()
         except Exception as e:
             return f"Gemini API Error: {e}"
             
@@ -55,46 +62,67 @@ def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
             res = requests.post("http://localhost:11434/api/generate", json={
                 "model": "gemma:2b", "prompt": sql_prompt, "stream": False
             })
-            sql_query = res.json().get("response", "").strip().replace("```sql", "").replace("```", "").replace(";", "")
+            raw_response = res.json().get("response", "").strip()
         except Exception as e:
-            return f"Local Gemma Error: {e}"
+            return "⚠️ **Local Engine Offline:** Ensure Ollama is running (`ollama run gemma:2b`)."
 
-    if not sql_query or len(sql_query) < 10:
-         return f"Error: The AI was unable to generate a valid SQL query."
+    # --- STEP 2: BULLETPROOF PARSING ---
+    # Convert response to uppercase just for checking conditions safely
+    upper_resp = raw_response.upper()
+    
+    # CASE A: Database Query (Checks for 'SQL:' or the word 'SELECT')
+    if upper_resp.startswith("SQL:") or "SELECT " in upper_resp:
+        # Clean the string so SQLite can read it
+        sql_query = raw_response.replace("SQL:", "").replace("sql:", "").strip()
+        sql_query = sql_query.replace("```sql", "").replace("```", "").replace(";", "")
+        
+        if len(sql_query) < 10:
+             return "Error: Generated an invalid SQL query."
+             
+        print(f"[AI AGENT] Generated SQL: {sql_query}")
+        db_results = execute_read_query(sql_query)
+        
+        # --- STEP 3: DYNAMIC TRANSLATION ---
+        translation_prompt = f"""
+        User Question: "{user_question}"
+        Raw Database Result: {db_results}
+        
+        Act as a highly intelligent, conversational AI Data Analyst. 
+        Answer the user's question directly and naturally based ONLY on the raw data provided.
+        Do NOT mention "the database" or "raw data". Just answer like a human expert.
+        """
+        
+        friendly_answer = ""
+        
+        if engine == "Cloud Engine (Gemini)":
+            try:
+                response = client.models.generate_content(model='gemini-2.5-flash', contents=translation_prompt)
+                friendly_answer = response.text.strip()
+            except Exception as e:
+                friendly_answer = f"Raw Data: {db_results}" 
+                
+        elif engine == "Local Engine (Gemma)":
+            try:
+                res = requests.post("http://localhost:11434/api/generate", json={
+                    "model": "gemma:2b", "prompt": translation_prompt, "stream": False
+                })
+                friendly_answer = res.json().get("response", "").strip()
+            except Exception as e:
+                friendly_answer = f"⚠️ Local translation offline. Raw Data: `{db_results}`"
 
-    # --- STEP 2: Execute SQL ---
-    print(f"[AI AGENT] Generated SQL: {sql_query}")
-    db_results = execute_read_query(sql_query)
-    
-    # --- STEP 3: Translate Raw Data to English ---
-    translation_prompt = f"""
-    The user asked: "{user_question}"
-    The database returned this raw data: {db_results}
-    
-    Act as a friendly, professional AI assistant. Answer the user's question smoothly in 1 or 2 sentences based strictly on the raw data. 
-    DO NOT mention SQL, queries, or tuples. Just give the final answer.
-    """
-    
-    friendly_answer = ""
-    
-    if engine == "Cloud Engine (Gemini)":
-        try:
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=translation_prompt)
-            friendly_answer = response.text.strip()
-        except Exception as e:
-            friendly_answer = f"Raw Data: {db_results}" # Fallback if translation fails
-            
-    elif engine == "Local Engine (Gemma)":
-        try:
-            res = requests.post("http://localhost:11434/api/generate", json={
-                "model": "gemma:2b", "prompt": translation_prompt, "stream": False
-            })
-            friendly_answer = res.json().get("response", "").strip()
-        except:
-            friendly_answer = f"Raw Data: {db_results}"
+        return {
+            "sql_query": sql_query,
+            "raw_results": db_results,
+            "friendly_answer": friendly_answer
+        }
 
-    return {
-        "sql_query": sql_query,
-        "raw_results": db_results,
-        "friendly_answer": friendly_answer
-    }
+    # CASE B: Dynamic Conversation (If it uses the CHAT: prefix)
+    elif upper_resp.startswith("CHAT:"):
+        clean_msg = raw_response[5:].strip() # Removes the "CHAT:" prefix
+        return {"sql_query": None, "raw_results": None, "friendly_answer": clean_msg}
+        
+    # CASE C: Forgiving Fallback (If the LLM forgot the prefix entirely)
+    else:
+        # Instead of an error, we just pass its raw conversational text straight to the user!
+        return {"sql_query": None, "raw_results": None, "friendly_answer": raw_response.strip()}
+    

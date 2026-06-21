@@ -2,6 +2,8 @@ import streamlit as st
 from PIL import Image
 import time
 from io import BytesIO
+import os
+import base64
 
 # Import backend logic
 from backend.router import mock_predict_stage
@@ -58,26 +60,93 @@ if app_mode == "Live Inspection":
     # --- ADVANCED RAW HTML LANDING PAGE ---
     if uploaded_file is None:
         
-        # BULLETPROOF FIX: Implicit String Concatenation.
-        # This flattens the HTML into a single continuous line, completely bypassing Streamlit's Markdown bugs.
-        advanced_html_layout = (
-            '<div class="glass-container">'
-                '<div class="glass-card">'
-                    '<h3>🧠 5 Neural Networks</h3>'
-                    '<p>Engineered with YOLO11 and SAHI slicing architectures. Capable of mapping macro structural failures and microscopic PCB etching spurs simultaneously.</p>'
+        # 1. FETCH LIVE TELEMETRY DATA
+        df = fetch_all_logs()
+        total_scans = len(df)
+        
+        # FIX: We now filter the dataframe to count only the images that actually have defects
+        total_defected_images = len(df[df['total_defects'] > 0]) if not df.empty else 0
+        
+        # 2. HELPER FUNCTION: Convert local images to Base64 HTML strings
+        def get_img_string(filepath):
+            if os.path.exists(filepath):
+                with open(filepath, "rb") as img_file:
+                    encoded_string = base64.b64encode(img_file.read()).decode()
+                mime_type = "image/png" if filepath.lower().endswith('.png') else "image/jpeg"
+                return f"data:{mime_type};base64,{encoded_string}"
+            return ""
+
+        # 3. LOAD YOUR TWO EXAMPLE IMAGES
+        img_original = get_img_string("assets/original.jpg")
+        img_detected = get_img_string("assets/detected.jpg")
+        
+        # 4. BULLETPROOF HTML CONSTRUCTION
+        landing_page_html = (
+            # --- SECTION 1: LIVE TELEMETRY ---
+            '<div class="section-header">Live System Telemetry</div>'
+            '<div class="telemetry-row">'
+                '<div class="tel-card">'
+                    '<div class="tel-value" style="color: #10B981;">ON</div>'
+                    '<div class="tel-label">Database Status</div>'
                 '</div>'
-                '<div class="glass-card">'
-                    '<h3>⚡ Sub-Second Latency</h3>'
-                    '<p>Asynchronous inference pipeline optimized for edge-compute hardware. Designed to keep up with high-throughput factory manufacturing lines.</p>'
+                '<div class="tel-card">'
+                    '<div class="tel-value">5/5</div>'
+                    '<div class="tel-label">Active Models</div>'
                 '</div>'
-                '<div class="glass-card">'
-                    '<h3>🗄️ SQL Agent Telemetry</h3>'
-                    '<p>Every scan is structurally encoded and backed up to a local SQLite cluster, fully queryable via our integrated Google Gemini Text-to-SQL Agent.</p>'
+                '<div class="tel-card">'
+                    f'<div class="tel-value">{total_scans}</div>'
+                    '<div class="tel-label">Total Scanned Images</div>'
+                '</div>'
+                '<div class="tel-card">'
+                    f'<div class="tel-value">{total_defected_images}</div>'
+                    '<div class="tel-label">Total Defected Images</div>'
+                '</div>'
+            '</div>'
+            
+            # --- SECTION 2: DEFECT TYPOLOGY (TEXT ONLY) ---
+            '<div class="section-header">Bare-Board Defect Typology (Stages 1-3)</div>'
+            '<div class="typology-grid">'
+                '<div class="typ-card">'
+                    '<div class="typ-title">⚡ 1. Short Circuit</div>'
+                    '<div class="typ-desc">Unintended conductive pathway between two adjacent copper traces.</div>'
+                '</div>'
+                '<div class="typ-card">'
+                    '<div class="typ-title">🔗 2. Open Circuit</div>'
+                    '<div class="typ-desc">A complete break or gap in a trace, disrupting electrical flow.</div>'
+                '</div>'
+                '<div class="typ-card">'
+                    '<div class="typ-title">🕳️ 3. Mousebite</div>'
+                    '<div class="typ-desc">Irregular, jagged missing chunks of copper along the edge of a trace.</div>'
+                '</div>'
+                '<div class="typ-card">'
+                    '<div class="typ-title">🔪 4. Spur</div>'
+                    '<div class="typ-desc">An unwanted microscopic protrusion of copper extending outward.</div>'
+                '</div>'
+                '<div class="typ-card">'
+                    '<div class="typ-title">🎯 5. Pin Hole</div>'
+                    '<div class="typ-desc">Tiny circular indentations or missing copper spots within a solid pad.</div>'
+                '</div>'
+                '<div class="typ-card">'
+                    '<div class="typ-title">🧩 6. Spurious Copper</div>'
+                    '<div class="typ-desc">Excess, un-etched copper fragments left behind on the bare substrate.</div>'
+                '</div>'
+            '</div>'
+
+            # --- SECTION 3: LIVE INFERENCE EXAMPLE (IMAGES) ---
+            '<div class="section-header">System Capability Demonstration</div>'
+            '<div class="comparison-container">'
+                '<div class="img-box">'
+                    '<div class="img-label">Input: Original Image</div>'
+                    f'<img src="{img_original}" class="demo-img" alt="Original PCB">'
+                '</div>'
+                '<div class="img-box">'
+                    '<div class="img-label">Output: Detected Image</div>'
+                    f'<img src="{img_detected}" class="demo-img" alt="Detected PCB">'
                 '</div>'
             '</div>'
         )
         
-        st.markdown(advanced_html_layout, unsafe_allow_html=True)
+        st.markdown(landing_page_html, unsafe_allow_html=True)
 
 
     # --- INFERENCE EXECUTION ---
@@ -216,7 +285,7 @@ elif app_mode == "AI Assistant":
                     st.markdown(f"{code_ticks}sql\n{msg['sql']}\n{code_ticks}")
                     st.markdown(f"**Raw Data:** `{msg.get('raw', '')}`")
 
-    # Chat execution
+    # --- 3. Chat Input & Execution ---
     if prompt := st.chat_input("Ask a question about your database..."):
         
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -224,30 +293,23 @@ elif app_mode == "AI Assistant":
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing database..."):
+            with st.spinner("Analyzing data..."):
                 response = ask_database(prompt, engine=engine_choice, api_key=api_key)
                 
+                # If the AI returned a dictionary (success)
                 if isinstance(response, dict):
                     friendly_text = response['friendly_answer']
-                    sql = response['sql_query']
-                    raw_data = response['raw_results']
                     
-                    # 1. Print the friendly human text
+                    # Print ONLY the friendly human text
                     st.markdown(friendly_text)
                     
-                    # 2. Hide the code in an expander
-                    with st.expander("🔍 View Database Query"):
-                        code_ticks = "`" * 3
-                        st.markdown(f"{code_ticks}sql\n{sql}\n{code_ticks}")
-                        st.markdown(f"**Raw Data:** `{raw_data}`")
-                    
-                    # Save everything to memory so it stays on screen during refresh
+                    # Save only the conversational text to memory
                     st.session_state.messages.append({
                         "role": "assistant", 
-                        "content": friendly_text, 
-                        "sql": sql, 
-                        "raw": raw_data
+                        "content": friendly_text
                     })
+                
+                # If the AI returned a string (Error)
                 else:
                     st.error(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response, "sql": None})
+                    st.session_state.messages.append({"role": "assistant", "content": response})
