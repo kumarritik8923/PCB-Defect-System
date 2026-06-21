@@ -4,3 +4,5 @@ sahi
 Pillow
 numpy
 opencv-python-headless
+google-genai
+requests
