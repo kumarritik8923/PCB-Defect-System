@@ -3,6 +3,6 @@ ultralytics
 sahi
 Pillow
 numpy
-opencv-python-headless
 google-genai
 requests
+opencv-python-headless==4.10.0.84
