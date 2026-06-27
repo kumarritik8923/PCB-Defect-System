@@ -1,5 +1,9 @@
 import sqlite3
+import os
+import json
+import time
 from google import genai 
+import requests
 
 DB_PATH = "pcb_database.db"
 
@@ -12,6 +16,175 @@ Columns:
 - total_defects (INTEGER): The sum of all defects found in the image.
 - granular_details (TEXT): A JSON dictionary of specific defects (e.g., '{"Mousebite": 2}').
 - image_path (TEXT): Where the image is saved.
+"""
+
+ENGINEERING_CONTEXT = """
+================ PCB AOI ENGINEERING KNOWLEDGE BASE ================
+
+You are a Senior PCB Manufacturing and Quality Assurance Engineer.
+
+Your task:
+1. Explain detected defects.
+2. Identify probable root causes.
+3. Recommend ACCEPT, REWORK + REINSPECT or SCRAP.
+4. Consider BOTH manufacturing stage and defect type before deciding.
+
+---------------- FINAL DECISION OPTIONS ----------------
+
+ACCEPT
+- Board satisfies quality requirements.
+
+REWORK + REINSPECT
+- Defect can be repaired reliably.
+- Board must be inspected again after repair.
+
+SCRAP
+- Defect cannot be repaired reliably or economically.
+
+Never recommend SCRAP unless defect severity justifies it.
+
+====================================================================
+STAGE 1 : INKED BOARD INSPECTION
+Purpose:
+Verify that manufactured copper artwork matches the design blueprint.
+
+Typical Defects:
+mouse_bite, spur, missing_hole, short, open_circuit, spurious_copper
+
+Decision Guidelines:
+
+- spur, spurious_copper:
+  Usually removable -> REWORK + REINSPECT
+
+- mouse_bite:
+  Minor damage -> REWORK
+  Severe conductor loss -> SCRAP
+
+- open_circuit:
+  External trace -> REWORK
+  Large or critical trace damage -> SCRAP
+
+- short:
+  Surface copper bridge -> REWORK
+
+- missing_hole:
+  Electrical via missing -> SCRAP
+
+====================================================================
+STAGE 2 : POST ETCH INSPECTION
+Purpose:
+Inspect physical copper traces after etching.
+
+Defects found at this stage are generally more severe because copper has already been permanently processed.
+
+Decision Guidelines:
+
+- spur, spurious_copper:
+  Usually repairable -> REWORK
+
+- short:
+  Surface bridge -> REWORK
+  Internal short -> SCRAP
+
+- open_circuit:
+  Accessible trace -> REWORK
+  Critical/high-speed trace -> SCRAP
+
+- mouse_bite:
+  Minor -> REWORK
+  Severe -> SCRAP
+
+- missing_hole:
+  Usually SCRAP
+
+====================================================================
+STAGE 3 : GREEN SOLDER MASK INSPECTION
+Purpose:
+Inspect board after protective coating application.
+
+Typical Defects:
+mouse_bite, spur, missing_hole, short, open_circuit, spurious_copper
+
+Because solder mask is already applied, repairs become more difficult.
+
+Decision Guidelines:
+
+- spur, spurious_copper:
+  REWORK if accessible.
+
+- open_circuit:
+  REWORK only if conductor accessible.
+
+- short:
+  REWORK if accessible.
+
+- severe conductor damage:
+  SCRAP.
+
+- missing electrical hole:
+  SCRAP.
+
+====================================================================
+STAGE 4 TOP VIEW : COMPONENT PLACEMENT INSPECTION
+
+good_placed:
+ACCEPT.
+
+not_good:
+Component placement error.
+
+Probable Causes:
+- Pick-and-place calibration error.
+- Nozzle issue.
+- Vision alignment error.
+
+Action:
+Usually REWORK + REINSPECT.
+
+====================================================================
+STAGE 4 SIDE VIEW : SOLDER JOINT INSPECTION
+
+good:
+ACCEPT.
+
+excess_solder:
+REWORK + REINSPECT.
+
+poor_solder:
+REWORK + REINSPECT.
+
+spike:
+REWORK + REINSPECT.
+
+Root Causes:
+- Incorrect solder paste volume.
+- Improper reflow profile.
+- Flux contamination.
+
+====================================================================
+RESPONSE FORMAT
+
+### Defect Analysis
+
+### Possible Root Cause
+
+### Recommended Action
+(ACCEPT / REWORK + REINSPECT / SCRAP)
+
+### Manufacturing Recommendation
+
+### Severity
+(LOW / MEDIUM / HIGH / CRITICAL)
+
+Rules:
+
+1. Always consider manufacturing stage before deciding.
+2. If multiple defects exist, prioritize the most severe defect.
+3. If any defect is non-repairable, final recommendation should be SCRAP.
+4. Never invent measurements or process parameters.
+5. If insufficient information exists, state uncertainty clearly.
+
+====================================================================
 """
 
 def execute_read_query(query):
@@ -30,18 +203,20 @@ def execute_read_query(query):
         return f"SQL Execution Error: {e}"
 
 def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
-    # --- STEP 1: SIMPLIFIED PROMPT FOR SMALL MODELS ---
     sql_prompt = f"""
-    You are an AI Factory Data Analyst for a PCB Defect Detection System.
+    You are an AI Factory Data Analyst and Senior PCB QA Engineer.
+    
     Database Schema: {DATABASE_SCHEMA}
+    {ENGINEERING_CONTEXT}
+    
     User Input: "{user_question}"
     
     INSTRUCTIONS:
-    If the user asks about the factory database, return ONLY a valid SQLite query starting with "SQL:"
-    Example: SQL: SELECT COUNT(*) FROM inference_logs
-    
-    If the user greets you, talks about other topics, or asks out-of-domain questions, politely reply starting with "CHAT:"
-    Example: CHAT: I am a PCB Data Analyst. I don't know about Doraemon, but I can check our factory logs!
+    1. If the user asks to look up factory records, trends, or stats, return ONLY a valid SQLite query starting with "SQL: "
+       Example: SQL: SELECT COUNT(*) FROM inference_logs
+       
+    2. If the user asks a general engineering question (e.g., "what to do if a board is defective?"), a greeting, or anything not requiring database lookup, answer directly starting with "CHAT: "
+       Example: CHAT: If a board has a short circuit, standard protocol dictates...
     """
     
     raw_response = ""
@@ -51,60 +226,76 @@ def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
         if not api_key: return "Error: Provide Gemini API Key in secrets."
         try:
             client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=sql_prompt)
-            raw_response = response.text.strip()
+            for attempt in range(4):
+                try:
+                    response = client.models.generate_content(model='gemini-2.5-flash', contents=sql_prompt)
+                    raw_response = response.text.strip()
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    if "429" in error_msg or "503" in error_msg or "exhausted" in error_msg.lower():
+                        wait_time = 10 * (2 ** attempt) 
+                        print(f"[SYSTEM] Rate limit/High demand. Pausing for {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        return f"Gemini API Error: {error_msg}"
+            if not raw_response: return "Gemini Error: Rate limit exhausted after retries. Please wait 1 minute."
         except Exception as e:
-            return f"Gemini API Error: {e}"
+            return f"Gemini Initialization Error: {e}"
             
-    elif engine == "Local Engine (Gemma)":
+    elif engine == "Local Engine (Llama 3)":
         try:
-            import requests 
             res = requests.post("http://localhost:11434/api/generate", json={
-                "model": "gemma:2b", "prompt": sql_prompt, "stream": False
-            })
+                "model": "llama3:8b", "prompt": sql_prompt, "stream": False
+            }, timeout=180)
             raw_response = res.json().get("response", "").strip()
         except Exception as e:
-            return "⚠️ **Local Engine Offline:** Ensure Ollama is running (`ollama run gemma:2b`)."
+            return "⚠️ **Local Engine Offline:** Ensure Ollama is running (`ollama run llama3:8b`)."
 
-    # --- STEP 2: BULLETPROOF PARSING ---
-    # Convert response to uppercase just for checking conditions safely
     upper_resp = raw_response.upper()
     
-    # CASE A: Database Query (Checks for 'SQL:' or the word 'SELECT')
+    # CASE A: Database Query
     if upper_resp.startswith("SQL:") or "SELECT " in upper_resp:
-        # Clean the string so SQLite can read it
         sql_query = raw_response.replace("SQL:", "").replace("sql:", "").strip()
         sql_query = sql_query.replace("```sql", "").replace("```", "").replace(";", "")
         
-        if len(sql_query) < 10:
-             return "Error: Generated an invalid SQL query."
-             
-        print(f"[AI AGENT] Generated SQL: {sql_query}")
         db_results = execute_read_query(sql_query)
         
-        # --- STEP 3: DYNAMIC TRANSLATION ---
         translation_prompt = f"""
         User Question: "{user_question}"
         Raw Database Result: {db_results}
+        {ENGINEERING_CONTEXT}
         
-        Act as a highly intelligent, conversational AI Data Analyst. 
-        Answer the user's question directly and naturally based ONLY on the raw data provided.
-        Do NOT mention "the database" or "raw data". Just answer like a human expert.
+        Act as a highly intelligent PCB Data Analyst. 
+        Answer the user's question directly based ONLY on the raw data provided. Apply engineering context if asked for advice.
+        Do NOT mention "the database" or "raw data". Speak naturally.
         """
         
         friendly_answer = ""
         
         if engine == "Cloud Engine (Gemini)":
             try:
-                response = client.models.generate_content(model='gemini-2.5-flash', contents=translation_prompt)
-                friendly_answer = response.text.strip()
+                for attempt in range(4):
+                    try:
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=translation_prompt)
+                        friendly_answer = response.text.strip()
+                        break
+                    except Exception as e:
+                        if "429" in str(e) or "503" in str(e):
+                            time.sleep(10 * (2 ** attempt))
+                            continue
+                        else:
+                            friendly_answer = f"Raw Data: {db_results}" 
+                            break
+                if not friendly_answer: friendly_answer = f"Raw Data: {db_results}"
             except Exception as e:
                 friendly_answer = f"Raw Data: {db_results}" 
                 
-        elif engine == "Local Engine (Gemma)":
+        elif engine == "Local Engine (Llama 3)":
             try:
                 res = requests.post("http://localhost:11434/api/generate", json={
-                    "model": "gemma:2b", "prompt": translation_prompt, "stream": False
+                    "model": "llama3:8b", "prompt": translation_prompt, "stream": False
                 })
                 friendly_answer = res.json().get("response", "").strip()
             except Exception as e:
@@ -116,13 +307,11 @@ def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
             "friendly_answer": friendly_answer
         }
 
-    # CASE B: Dynamic Conversation (If it uses the CHAT: prefix)
+    # CASE B: Dynamic Conversation 
     elif upper_resp.startswith("CHAT:"):
-        clean_msg = raw_response[5:].strip() # Removes the "CHAT:" prefix
+        clean_msg = raw_response[5:].strip()
         return {"sql_query": None, "raw_results": None, "friendly_answer": clean_msg}
         
-    # CASE C: Forgiving Fallback (If the LLM forgot the prefix entirely)
+    # CASE C: Forgiving Fallback
     else:
-        # Instead of an error, we just pass its raw conversational text straight to the user!
         return {"sql_query": None, "raw_results": None, "friendly_answer": raw_response.strip()}
-    
