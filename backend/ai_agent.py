@@ -7,6 +7,9 @@ import requests
 
 DB_PATH = "pcb_database.db"
 
+# Pinned model — do NOT auto-update per user request.
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+
 DATABASE_SCHEMA = """
 Table: inference_logs
 Columns: 
@@ -189,129 +192,171 @@ Rules:
 
 def execute_read_query(query):
     try:
+        # Read-only allowlist: only permit a single SELECT statement.
+        cleaned = query.strip().rstrip(";").strip()
+        if not cleaned.upper().startswith("SELECT"):
+            return "Error: Only read-only SELECT queries are allowed."
+        if ";" in cleaned:  # block stacked/multiple statements
+            return "Error: Multiple statements are not allowed."
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        if "DROP" in query.upper() or "DELETE" in query.upper() or "UPDATE" in query.upper():
-            return "Error: Modifying the database is not allowed."
-            
-        cursor.execute(query)
+        cursor.execute(cleaned)
         results = cursor.fetchall()
         conn.close()
         return results
     except Exception as e:
         return f"SQL Execution Error: {e}"
 
-def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
-    sql_prompt = f"""
-    You are an AI Factory Data Analyst and Senior PCB QA Engineer.
-    
-    Database Schema: {DATABASE_SCHEMA}
-    {ENGINEERING_CONTEXT}
-    
-    User Input: "{user_question}"
-    
-    INSTRUCTIONS:
-    1. If the user asks to look up factory records, trends, or stats, return ONLY a valid SQLite query starting with "SQL: "
-       Example: SQL: SELECT COUNT(*) FROM inference_logs
-       
-    2. If the user asks a general engineering question (e.g., "what to do if a board is defective?"), a greeting, or anything not requiring database lookup, answer directly starting with "CHAT: "
-       Example: CHAT: If a board has a short circuit, standard protocol dictates...
-    """
-    
-    raw_response = ""
-    client = None
-    
+class LLMError(Exception):
+    """Raised when the selected engine cannot produce a response."""
+
+
+def _call_gemini(client, prompt):
+    last_err = ""
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            return (response.text or "").strip()
+        except Exception as e:
+            last_err = str(e)
+            if "429" in last_err or "503" in last_err or "exhausted" in last_err.lower():
+                wait_time = 5 * (2 ** attempt)
+                print(f"[SYSTEM] Rate limit/High demand. Pausing for {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise LLMError(f"Gemini API Error: {last_err}")
+    raise LLMError("Gemini Error: Rate limit exhausted after retries. Please wait a minute.")
+
+
+def _call_llama(prompt):
+    try:
+        res = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llama3:8b",
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 512},
+            },
+            timeout=90,
+        )
+        return res.json().get("response", "").strip()
+    except Exception:
+        raise LLMError("⚠️ **Local Engine Offline:** Ensure Ollama is running (`ollama run llama3:8b`).")
+
+
+def _generate(engine, prompt, api_key, client):
+    """Route a single prompt to the active engine and return raw text."""
     if engine == "Cloud Engine (Gemini)":
-        if not api_key: return "Error: Provide Gemini API Key in secrets."
+        return _call_gemini(client, prompt)
+    return _call_llama(prompt)
+
+
+ROUTER_PROMPT = """You are an autonomous PCB AOI Factory Agent. You have two capabilities:
+(A) query the factory inspection database, and (B) answer as a Senior PCB QA Engineer.
+
+Decide which ONE capability answers the user's message, then respond with EXACTLY one line
+using one of these prefixes — never both, never neither, never any other text before it:
+
+  SQL: <a single valid read-only SQLite SELECT statement>
+  CHAT: <a direct engineering answer>
+
+Use SQL when the user asks about stored inspections, counts, trends, a specific image/board,
+"how many defects", "what stage", "what should I do with image N", or any question that needs
+factory records. When the user references a specific board/image number N, scope the query by id.
+
+Database schema:
+{schema}
+
+Examples:
+  User: how many inspections total?           -> SQL: SELECT COUNT(*) FROM inference_logs
+  User: how many defects in image 5?          -> SQL: SELECT id, detected_stage, total_defects, granular_details FROM inference_logs WHERE id = 5
+  User: tell me about board 12, keep or scrap? -> SQL: SELECT id, detected_stage, total_defects, granular_details FROM inference_logs WHERE id = 12
+  User: which stage has the most defects?     -> SQL: SELECT detected_stage, SUM(total_defects) AS total FROM inference_logs GROUP BY detected_stage ORDER BY total DESC
+  User: how do I prevent mouse_bite?          -> CHAT: <engineering guidance>
+  User: hi                                     -> CHAT: Hello! Ask me about your inspection logs or defect handling.
+
+Rules:
+- Output MUST start with "SQL:" or "CHAT:". No markdown, no code fences, no explanation.
+- Never write INSERT/UPDATE/DELETE/DROP — only SELECT.
+
+User message: "{question}"
+"""
+
+
+def _extract_action(raw):
+    """Return ('SQL'|'CHAT'|None, payload) from a raw model response."""
+    text = (raw or "").strip()
+    # Strip stray code fences the model may add.
+    text = text.replace("```sql", "").replace("```", "").strip()
+    upper = text.upper()
+    idx_sql = upper.find("SQL:")
+    idx_chat = upper.find("CHAT:")
+    # Pick whichever prefix appears first.
+    candidates = [(i, tag) for i, tag in ((idx_sql, "SQL"), (idx_chat, "CHAT")) if i != -1]
+    if candidates:
+        start, tag = min(candidates)
+        payload = text[start + len(tag) + 1:].strip()
+        return tag, payload
+    # No explicit prefix but looks like a bare SELECT — treat as SQL.
+    if upper.lstrip().startswith("SELECT"):
+        return "SQL", text
+    return None, text
+
+
+def ask_database(user_question, engine="Cloud Engine (Gemini)", api_key=""):
+    client = None
+    if engine == "Cloud Engine (Gemini)":
+        if not api_key:
+            return "Error: Provide a Gemini API Key in secrets."
         try:
             client = genai.Client(api_key=api_key)
-            for attempt in range(4):
-                try:
-                    response = client.models.generate_content(model='gemini-2.5-flash', contents=sql_prompt)
-                    raw_response = response.text.strip()
-                    break
-                except Exception as e:
-                    error_msg = str(e)
-                    if "429" in error_msg or "503" in error_msg or "exhausted" in error_msg.lower():
-                        wait_time = 10 * (2 ** attempt) 
-                        print(f"[SYSTEM] Rate limit/High demand. Pausing for {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        return f"Gemini API Error: {error_msg}"
-            if not raw_response: return "Gemini Error: Rate limit exhausted after retries. Please wait 1 minute."
         except Exception as e:
             return f"Gemini Initialization Error: {e}"
-            
-    elif engine == "Local Engine (Llama 3)":
-        try:
-            res = requests.post("http://localhost:11434/api/generate", json={
-                "model": "llama3:8b", "prompt": sql_prompt, "stream": False
-            }, timeout=180)
-            raw_response = res.json().get("response", "").strip()
-        except Exception as e:
-            return "⚠️ **Local Engine Offline:** Ensure Ollama is running (`ollama run llama3:8b`)."
 
-    upper_resp = raw_response.upper()
-    
-    # CASE A: Database Query
-    if upper_resp.startswith("SQL:") or "SELECT " in upper_resp:
-        sql_query = raw_response.replace("SQL:", "").replace("sql:", "").strip()
-        sql_query = sql_query.replace("```sql", "").replace("```", "").replace(";", "")
-        
-        db_results = execute_read_query(sql_query)
-        
-        translation_prompt = f"""
-        User Question: "{user_question}"
-        Raw Database Result: {db_results}
-        {ENGINEERING_CONTEXT}
-        
-        Act as a highly intelligent PCB Data Analyst. 
-        Answer the user's question directly based ONLY on the raw data provided. Apply engineering context if asked for advice.
-        Do NOT mention "the database" or "raw data". Speak naturally.
-        """
-        
-        friendly_answer = ""
-        
-        if engine == "Cloud Engine (Gemini)":
+    router_prompt = ROUTER_PROMPT.format(schema=DATABASE_SCHEMA, question=user_question)
+
+    try:
+        raw_response = _generate(engine, router_prompt, api_key, client)
+        action, payload = _extract_action(raw_response)
+
+        # One corrective retry if the model ignored the protocol.
+        if action is None:
+            retry_prompt = (
+                router_prompt
+                + "\n\nYour previous reply did not start with SQL: or CHAT:. "
+                "Reply again with EXACTLY one line starting with SQL: or CHAT:."
+            )
+            raw_response = _generate(engine, retry_prompt, api_key, client)
+            action, payload = _extract_action(raw_response)
+
+        # CASE A: Database query
+        if action == "SQL":
+            db_results = execute_read_query(payload)
+            translation_prompt = f"""You are a Senior PCB Manufacturing QA Engineer analyzing factory inspection data.
+
+User question: "{user_question}"
+Query results (rows from inference_logs): {db_results}
+
+Note: the 'granular_details' field is a JSON object mapping defect class names to counts
+(e.g. {{"mouse_bite": 2, "short": 1}}). Parse it to reason about specific defect types.
+
+{ENGINEERING_CONTEXT}
+
+Answer the user's question directly using ONLY the data above. If they ask whether to keep,
+scrap, or rework a board, apply the engineering rules (consider stage AND defect type) and give
+a clear recommendation plus prevention/improvement advice. If the data is empty, say no matching
+records were found. Do NOT mention "the database", "SQL", or "raw data" — speak naturally."""
             try:
-                for attempt in range(4):
-                    try:
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=translation_prompt)
-                        friendly_answer = response.text.strip()
-                        break
-                    except Exception as e:
-                        if "429" in str(e) or "503" in str(e):
-                            time.sleep(10 * (2 ** attempt))
-                            continue
-                        else:
-                            friendly_answer = f"Raw Data: {db_results}" 
-                            break
-                if not friendly_answer: friendly_answer = f"Raw Data: {db_results}"
-            except Exception as e:
-                friendly_answer = f"Raw Data: {db_results}" 
-                
-        elif engine == "Local Engine (Llama 3)":
-            try:
-                res = requests.post("http://localhost:11434/api/generate", json={
-                    "model": "llama3:8b", "prompt": translation_prompt, "stream": False
-                })
-                friendly_answer = res.json().get("response", "").strip()
-            except Exception as e:
-                friendly_answer = f"⚠️ Local translation offline. Raw Data: `{db_results}`"
+                friendly_answer = _generate(engine, translation_prompt, api_key, client)
+            except LLMError:
+                friendly_answer = f"Here is what I found: {db_results}"
+            return {"sql_query": payload, "raw_results": db_results, "friendly_answer": friendly_answer}
 
-        return {
-            "sql_query": sql_query,
-            "raw_results": db_results,
-            "friendly_answer": friendly_answer
-        }
-
-    # CASE B: Dynamic Conversation 
-    elif upper_resp.startswith("CHAT:"):
-        clean_msg = raw_response[5:].strip()
+        # CASE B: Direct engineering chat (also covers corrective-retry success)
+        clean_msg = payload.strip() if action == "CHAT" else raw_response.strip()
         return {"sql_query": None, "raw_results": None, "friendly_answer": clean_msg}
-        
-    # CASE C: Forgiving Fallback
-    else:
-        return {"sql_query": None, "raw_results": None, "friendly_answer": raw_response.strip()}
+
+    except LLMError as e:
+        return str(e)

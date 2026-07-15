@@ -7,24 +7,24 @@ from .inference import (
     run_ai_classifier 
 )
 
-def mock_predict_stage(image, selection):
+def predict_stage(image, selection, conf=0.25):
     response = {"status": "success", "routed_to": None, "message": "", "processed_image": None, "details_dict": {}}
-    
+
     if selection == "Auto-Detect Stage (AI)":
         active_stage = run_ai_classifier(image)
     else:
         active_stage = selection
 
     if active_stage == "Stage 1: Inked Board":
-        res = run_stage1_inference(image)
+        res = run_stage1_inference(image, conf=conf)
     elif active_stage == "Stage 2: Acid Batch (Etched)":
-        res = run_stage2_sahi_inference(image)
+        res = run_stage2_sahi_inference(image, conf=conf)
     elif active_stage == "Stage 3: Green Coating":
-        res = run_stage3_inference(image)
+        res = run_stage3_inference(image, conf=conf)
     elif active_stage == "Stage 4: Component Welding (Top View)":
-        res = run_stage4_top_inference(image)
+        res = run_stage4_top_inference(image, conf=conf)
     elif active_stage == "Stage 4: Component Welding (Side View)":
-        res = run_stage4_side_inference(image)
+        res = run_stage4_side_inference(image, conf=conf)
     else:
         return {"status": "error", "message": f"Unknown routing failure: {active_stage}"}
 
@@ -39,3 +39,7 @@ def mock_predict_stage(image, selection):
         response["message"] = res["message"]
 
     return response
+
+
+# Backwards-compatible alias (function was formerly misnamed "mock").
+mock_predict_stage = predict_stage

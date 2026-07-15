@@ -1,5 +1,7 @@
 # Multi-Stage Automated PCB Defect Detection System with Intelligent Routing and AI Diagnostic Agent
 
+### Huggingface Deployement link: https://pcb-defect-system.streamlit.app/
+
 ## Overview
 
 This project presents an end-to-end computer vision and conversational AI pipeline for automated defect detection across multiple stages of the Printed Circuit Board (PCB) manufacturing process.

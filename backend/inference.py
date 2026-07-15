@@ -5,19 +5,30 @@ from PIL import Image
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
 
+# Default detection confidence (overridable per request from the UI).
+DEFAULT_CONF = 0.25
+
 # --- 1. GLOBAL MODEL LOADING ---
+# Initialize to None so a failed load degrades gracefully instead of NameError.
+stage1_model = None
+stage3_model = None
+stage4_top = None
+stage4_side = None
+router_model = None
+stage2_sahi_model = None
+
 try:
     stage1_model = YOLO("models/stage1_best.pt")
     stage3_model = YOLO("models/stage3_best.pt")
     stage4_top = YOLO("models/stage4_top_best.pt")
     stage4_side = YOLO("models/stage4_side_best.pt")
     router_model = YOLO("models/router_classifier_best.pt")
-    
+
     stage2_sahi_model = AutoDetectionModel.from_pretrained(
         model_type='yolov8',
         model_path="models/stage2_sahi_best.pt",
-        confidence_threshold=0.25,
-        device="cpu" 
+        confidence_threshold=DEFAULT_CONF,
+        device="cpu"
     )
     print("[SYSTEM] All Object Detection, Segmentation, & Router models loaded.")
 except Exception as e:
@@ -43,13 +54,15 @@ def extract_detailed_results(results, model, is_segmentation=False):
     return details
 
 # --- 2. STANDARD INFERENCE FUNCTION ---
-def run_standard_yolo(image_pil, model, target_size, is_segmentation=False):
+def run_standard_yolo(image_pil, model, target_size, is_segmentation=False, conf=DEFAULT_CONF):
     if model is None:
         return {"status": "error", "message": "Model weights missing."}
 
-    image_resized = image_pil.resize((target_size, target_size))
-    results = model.predict(source=image_resized, imgsz=target_size, conf=0.25)
-    
+    # Convert to RGB (handles RGBA/grayscale) and let YOLO letterbox internally
+    # instead of force-squishing to a square, which distorts aspect ratio.
+    image_rgb = image_pil.convert("RGB")
+    results = model.predict(source=image_rgb, imgsz=target_size, conf=conf)
+
     result_bgr = results[0].plot()
     result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
     
@@ -71,38 +84,67 @@ def run_standard_yolo(image_pil, model, target_size, is_segmentation=False):
     }
 
 # --- 3. STAGE-SPECIFIC WRAPPERS ---
-def run_stage1_inference(image_pil):
-    return run_standard_yolo(image_pil, stage1_model, target_size=640)
+def run_stage1_inference(image_pil, conf=DEFAULT_CONF):
+    return run_standard_yolo(image_pil, stage1_model, target_size=640, conf=conf)
 
-def run_stage3_inference(image_pil):
-    return run_standard_yolo(image_pil, stage3_model, target_size=600)
+def run_stage3_inference(image_pil, conf=DEFAULT_CONF):
+    return run_standard_yolo(image_pil, stage3_model, target_size=600, conf=conf)
 
-def run_stage4_top_inference(image_pil):
-    return run_standard_yolo(image_pil, stage4_top, target_size=1024, is_segmentation=True)
+def run_stage4_top_inference(image_pil, conf=DEFAULT_CONF):
+    return run_standard_yolo(image_pil, stage4_top, target_size=1024, is_segmentation=True, conf=conf)
 
-def run_stage4_side_inference(image_pil):
-    return run_standard_yolo(image_pil, stage4_side, target_size=1024, is_segmentation=True)
+def run_stage4_side_inference(image_pil, conf=DEFAULT_CONF):
+    return run_standard_yolo(image_pil, stage4_side, target_size=1024, is_segmentation=True, conf=conf)
+
+# Distinct BGR colors reused for per-class SAHI boxes.
+_SAHI_COLORS = [
+    (255, 0, 0), (0, 200, 0), (0, 128, 255), (255, 0, 255),
+    (0, 255, 255), (255, 128, 0), (128, 0, 255),
+]
 
 # --- 4. SAHI INFERENCE FUNCTION (Stage 2) ---
-def run_stage2_sahi_inference(image_pil):
-    if 'stage2_sahi_model' not in globals():
-         return {"status": "error", "message": "SAHI Model missing."}
-    
-    image_array = np.array(image_pil)
+def run_stage2_sahi_inference(image_pil, conf=DEFAULT_CONF):
+    if stage2_sahi_model is None:
+        return {"status": "error", "message": "SAHI Model missing."}
+
+    # SAHI expects a numpy array; ensure 3-channel RGB.
+    image_array = np.array(image_pil.convert("RGB"))
     result = get_sliced_prediction(image_array, stage2_sahi_model, slice_height=640, slice_width=640)
 
     result_image_array = image_array.copy()
     detailed_defects = {}
-    
+    class_colors = {}
+
+    kept = []
     for obj in result.object_prediction_list:
+        score_val = getattr(getattr(obj, "score", None), "value", None)
+        if isinstance(score_val, (int, float)) and score_val < conf:
+            continue  # honor the per-request confidence slider
+        kept.append(obj)
+
+    for obj in kept:
         bbox = obj.bbox.to_xyxy()
-        cv2.rectangle(result_image_array, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
-        
+        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+
         class_name = obj.category.name
+        if class_name not in class_colors:
+            class_colors[class_name] = _SAHI_COLORS[len(class_colors) % len(_SAHI_COLORS)]
+        color = class_colors[class_name]
+
+        score = getattr(getattr(obj, "score", None), "value", None)
+        label = f"{class_name} {score:.2f}" if isinstance(score, (int, float)) else class_name
+
+        cv2.rectangle(result_image_array, (x1, y1), (x2, y2), color, 2)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        ty = max(y1, th + 4)
+        cv2.rectangle(result_image_array, (x1, ty - th - 4), (x1 + tw + 2, ty), color, -1)
+        cv2.putText(result_image_array, label, (x1 + 1, ty - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
         detailed_defects[class_name] = detailed_defects.get(class_name, 0) + 1
 
-    total_defects = len(result.object_prediction_list)
-    
+    total_defects = len(kept)
+
     if total_defects == 0:
         msg = "Board Pass: No microscopic defects detected."
     else:
@@ -119,10 +161,10 @@ def run_stage2_sahi_inference(image_pil):
 
 # --- 5. ROUTER CLASSIFIER ---
 def run_ai_classifier(image_pil):
-    if 'router_model' not in globals():
+    if router_model is None:
         return "Stage 1: Inked Board"
-        
-    results = router_model.predict(source=image_pil, imgsz=224)
+
+    results = router_model.predict(source=image_pil.convert("RGB"), imgsz=224)
     raw_class_name = results[0].names[results[0].probs.top1]
     
     mapping = {

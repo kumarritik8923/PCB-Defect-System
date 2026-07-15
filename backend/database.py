@@ -60,6 +60,21 @@ def fetch_all_logs():
     conn.close()
     return df
 
+def fetch_log_by_id(log_id):
+    """Return a single inspection row as a dict, or None if not found."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM inference_logs WHERE id = ?", (log_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB ERROR] fetch_log_by_id failed: {e}")
+        return None
+    finally:
+        conn.close()
+
 def delete_log(log_id):
     try:
         conn = sqlite3.connect(DB_PATH)
