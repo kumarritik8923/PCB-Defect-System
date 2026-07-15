@@ -111,7 +111,7 @@ Project_Name/
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/kumarritik8923/PCB-Defect-System/.git
+git clone https://github.com/kumarritik8923/PCB-Defect-System
 
 cd your-repository-name
 ```
